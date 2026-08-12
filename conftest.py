@@ -5,6 +5,7 @@ a service container. Each test namespace gets its own throwaway database so
 migration tests can't disturb data tests.
 """
 
+import os
 from collections.abc import Iterator
 
 import httpx
@@ -12,10 +13,19 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
-from phulax_api.settings import get_settings
 from phulax_policy.examples import CANONICAL_BUNDLE_YAML
-from sqlalchemy import Engine, create_engine, text
-from sqlalchemy.orm import sessionmaker
+from phulax_policy.signing import generate_keypair
+
+# There is no checked-in policy keypair (T08): tests run against an
+# ephemeral one, injected before any Settings object is instantiated.
+# setdefault so an explicit pair (e.g. from --env-file .env) wins.
+_test_private_key, _test_public_key = generate_keypair()
+os.environ.setdefault("POLICY_SIGNING_KEY", _test_private_key)
+os.environ.setdefault("POLICY_PUBLIC_KEY", _test_public_key)
+
+from phulax_api.settings import get_settings  # noqa: E402
+from sqlalchemy import Engine, create_engine, text  # noqa: E402
+from sqlalchemy.orm import sessionmaker  # noqa: E402
 
 ALEMBIC_INI = "apps/api/alembic.ini"
 ALL_TABLES = (

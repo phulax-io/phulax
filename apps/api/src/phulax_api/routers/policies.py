@@ -25,6 +25,11 @@ router = APIRouter(prefix="/v1", tags=["policies"])
 
 @router.post("/policy-bundles", response_model=BundleOut, status_code=201)
 def publish_bundle(body: BundlePublish, db: Session = Depends(get_db)) -> BundleOut:
+    if not get_settings().policy_signing_key:
+        raise HTTPException(
+            status_code=503,
+            detail="POLICY_SIGNING_KEY is not configured — bundles cannot be signed",
+        )
     if db.get(Organization, body.org_id) is None:
         raise HTTPException(status_code=404, detail="organization not found")
     try:

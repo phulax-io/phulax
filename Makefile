@@ -14,13 +14,15 @@ SRC := PYTHONPATH=apps/api/src:apps/gateway/src:packages/policy/src
 help: ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
-bootstrap: ## Create venv, install locked dependencies, install git hooks
+bootstrap: ## Create venv, install locked dependencies, git hooks, local policy keys
 	uv sync --all-packages
 	@# macOS/iCloud can set the UF_HIDDEN flag inside .venv; CPython 3.13+
 	@# skips hidden .pth files, which silently breaks editable installs.
 	@command -v chflags >/dev/null 2>&1 && find .venv -name '*.pth' -exec chflags nohidden {} + || true
 	uv run pre-commit install
-	@echo "bootstrap: done. Copy .env.example to .env before 'make dev'."
+	@test -f .env || (cp .env.example .env && echo "bootstrap: created .env from .env.example")
+	@$(SRC) uv run --no-sync python scripts/generate_policy_keys.py
+	@echo "bootstrap: done. Review .env, then 'make dev'."
 
 dev: ## Start local services: postgres, redis, api, gateway
 	docker compose up -d --build --wait postgres redis api gateway

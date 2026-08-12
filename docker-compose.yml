@@ -35,7 +35,7 @@ services:
       PHULAX_ENV: ${PHULAX_ENV:-dev}
       DATABASE_URL: postgresql://${POSTGRES_USER:-phulax}:${POSTGRES_PASSWORD:-phulax-dev-only}@postgres:5432/${POSTGRES_DB:-phulax}
       GATEWAY_SIGNING_KEY: ${GATEWAY_SIGNING_KEY:-fake-dev-key-change-me-not-a-secret-0001}
-      POLICY_SIGNING_KEY: ${POLICY_SIGNING_KEY:-kKasbk/pQFhr30OmFNV4kjqKk1Xw76ga6wPtxGpp61Y=}
+      POLICY_SIGNING_KEY: ${POLICY_SIGNING_KEY:?no policy signing key — run 'make bootstrap' to generate one into .env}
     ports:
       - "127.0.0.1:${API_PORT:-8000}:8000"
     depends_on:
@@ -61,7 +61,7 @@ services:
       PHULAX_ENV: ${PHULAX_ENV:-dev}
       CONTROL_PLANE_URL: http://api:8000
       GATEWAY_SIGNING_KEY: ${GATEWAY_SIGNING_KEY:-fake-dev-key-change-me-not-a-secret-0001}
-      POLICY_PUBLIC_KEY: ${POLICY_PUBLIC_KEY:-6mxLfImpih3R5NzxL3H6wCBH2ARC9CvjmdKFotj2fyg=}
+      POLICY_PUBLIC_KEY: ${POLICY_PUBLIC_KEY:?no policy public key — run 'make bootstrap' to generate one into .env}
     ports:
       - "127.0.0.1:${GATEWAY_PORT:-8080}:8080"
     depends_on:

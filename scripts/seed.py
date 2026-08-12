@@ -13,6 +13,7 @@ import sys
 import httpx
 import yaml
 from phulax_policy.examples import CANONICAL_BUNDLE_YAML
+from phulax_policy.signing import verify_bundle
 
 API_URL = f"http://127.0.0.1:{os.environ.get('API_PORT', '8000')}"
 
@@ -63,11 +64,21 @@ TOOLS = [
 
 def publish_bundle_if_changed(client: httpx.Client, org_id: str) -> dict:
     """Publish the canonical bundle unless the latest version already
-    carries exactly these rules."""
+    carries exactly these rules AND still verifies under the current
+    public key — after a key rotation the old signature is dead weight
+    and the gateway would (correctly) reject it."""
     canonical_rules = yaml.safe_load(CANONICAL_BUNDLE_YAML)["rules"]
+    public_key = os.environ.get("POLICY_PUBLIC_KEY", "")
     latest = client.get("/v1/policy-bundles/latest", params={"org_id": org_id})
-    if latest.status_code == 200 and latest.json()["rules"] == canonical_rules:
-        return latest.json()
+    if latest.status_code == 200:
+        bundle = latest.json()
+        if bundle["rules"] == canonical_rules and verify_bundle(
+            public_key,
+            version=bundle["version"],
+            rules_data=bundle["rules"],
+            signature=bundle["signature"],
+        ):
+            return bundle
     response = client.post(
         "/v1/policy-bundles", json={"org_id": org_id, "document": CANONICAL_BUNDLE_YAML}
     )
