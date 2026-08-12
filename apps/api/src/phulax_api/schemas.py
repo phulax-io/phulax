@@ -8,6 +8,7 @@ Sensitivity = Literal["low", "medium", "high"]
 SideEffect = Literal["read", "write", "irreversible"]
 Verdict = Literal["allow", "deny", "require_approval", "freeze"]
 ExecutionState = Literal["AUTHORIZED", "EXECUTING", "SUCCEEDED", "FAILED"]
+ApprovalState = Literal["PENDING", "APPROVED", "REJECTED", "EXPIRED", "CONSUMED", "VOIDED"]
 
 
 class OrgCreate(BaseModel):
@@ -23,6 +24,7 @@ class UserCreate(BaseModel):
     org_id: uuid.UUID
     email: EmailStr
     name: str = Field(min_length=1, max_length=200)
+    role: str | None = Field(default=None, max_length=50)
 
 
 class UserOut(BaseModel):
@@ -30,6 +32,7 @@ class UserOut(BaseModel):
     org_id: uuid.UUID
     email: str
     name: str
+    role: str | None = None
 
 
 class AgentRegister(BaseModel):
@@ -71,6 +74,10 @@ class ToolCreate(BaseModel):
     args_schema: dict = Field(description="JSON Schema (draft 2020-12) for arguments")
     sensitivity: Sensitivity
     side_effect: SideEffect
+    sensitive_fields: list[str] = Field(
+        default_factory=list,
+        description="Dotted argument paths redacted before leaving the gateway",
+    )
 
 
 class ToolOut(BaseModel):
@@ -81,6 +88,7 @@ class ToolOut(BaseModel):
     args_schema: dict
     sensitivity: Sensitivity
     side_effect: SideEffect
+    sensitive_fields: list[str]
 
 
 class SessionCreate(BaseModel):
@@ -109,6 +117,7 @@ class ActionRequestIn(BaseModel):
     """Metadata only (ADR-0002): the gateway never sends raw arguments."""
 
     request_id: uuid.UUID
+    trace_id: uuid.UUID | None = None
     idempotency_key: str | None = None
     session_id: uuid.UUID
     tool_name: str
@@ -116,6 +125,8 @@ class ActionRequestIn(BaseModel):
     acting_user_id: uuid.UUID | None = None
     canonical_hash: str = Field(min_length=64, max_length=64)
     args_meta: dict = Field(default_factory=dict)
+    content_mode: Literal["metadata_only"] = "metadata_only"
+    redacted_fields: list[str] = Field(default_factory=list)
     requested_at: datetime
 
 
@@ -137,14 +148,18 @@ class EventIngest(BaseModel):
 class EventOut(BaseModel):
     id: uuid.UUID
     request_id: uuid.UUID
+    trace_id: uuid.UUID | None
     session_id: uuid.UUID
     tool_name: str
     environment: str
     canonical_hash: str
     args_meta: dict
+    content_mode: str
+    redacted_fields: list[str]
     type: str
-    verdict: Verdict
+    verdict: Verdict | None
     rule: str
+    detail: dict | None
     reason_codes: list[str]
     matched_rules: list[str]
     risk_score: int | None
@@ -196,4 +211,81 @@ class ExecutionOut(BaseModel):
     canonical_hash: str
     state: ExecutionState
     result_meta: dict | None
+    created_at: datetime
+
+
+class ApprovalResolve(BaseModel):
+    """The gateway's one round trip per require_approval decision: consume
+    an approval that authorizes exactly this request, or surface/create the
+    pending one. args_preview arrives already redacted (plan §7.3 Day 20)."""
+
+    org_id: uuid.UUID
+    request_id: uuid.UUID
+    trace_id: uuid.UUID | None = None
+    session_id: uuid.UUID
+    canonical_hash: str = Field(min_length=64, max_length=64)
+    tool_name: str
+    environment: str
+    agent_version: str
+    policy_version: str
+    approver_role: str = Field(min_length=1, max_length=50)
+    requester_user_id: uuid.UUID | None = None
+    args_preview: dict = Field(default_factory=dict)
+    redacted_fields: list[str] = Field(default_factory=list)
+    reason_codes: list[str] = Field(default_factory=list)
+    matched_rules: list[str] = Field(default_factory=list)
+    risk_score: int | None = None
+
+
+class ApprovalOut(BaseModel):
+    id: uuid.UUID
+    org_id: uuid.UUID
+    request_id: uuid.UUID
+    trace_id: uuid.UUID | None
+    session_id: uuid.UUID
+    canonical_hash: str
+    tool_name: str
+    environment: str
+    agent_version: str
+    policy_version: str
+    approver_role: str
+    requester_user_id: uuid.UUID | None
+    args_preview: dict
+    redacted_fields: list[str]
+    reason_codes: list[str]
+    matched_rules: list[str]
+    risk_score: int | None
+    state: ApprovalState
+    expires_at: datetime
+    decided_by: uuid.UUID | None
+    decided_at: datetime | None
+    consumed_at: datetime | None
+    created_at: datetime
+
+
+class ApprovalResolveOut(BaseModel):
+    mode: Literal["consumed", "pending", "rejected"]
+    created: bool = False
+    approval: ApprovalOut
+
+
+class ApprovalDecision(BaseModel):
+    user_id: uuid.UUID
+
+
+class TimelineEventOut(BaseModel):
+    """One step of the reconstructed story (plan §11.3, Day 19)."""
+
+    id: uuid.UUID
+    trace_id: uuid.UUID | None
+    request_id: uuid.UUID
+    session_id: uuid.UUID
+    tool_name: str
+    type: str
+    verdict: Verdict | None
+    rule: str
+    detail: dict | None
+    reason_codes: list[str]
+    matched_rules: list[str]
+    policy_version: str | None
     created_at: datetime

@@ -1,18 +1,21 @@
-"""The gateway's action path — Phase 2: the gateway *enforces*.
+"""The gateway's action path — Phase 3: enforcement plus human judgment.
 
 Order encodes the protected-action definition of done: authenticate →
 validate → evaluate policy (§11.4, deterministic) → **record the decision
 event** → only then execute. If the allow event cannot be written, the
 action does not proceed (docs/security/protected-action-dod.md, point 5).
 
-Execution adds at-most-once semantics (plan §5.5): when the caller supplies
-an idempotency key, the side effect happens only for the one request that
-wins the control plane's atomic claim; duplicates read the recorded outcome.
+Execution is at-most-once per idempotency key (plan §5.5). A
+require_approval decision pauses for a human: the approval binds to this
+exact canonical hash, is consumed atomically exactly once, and the argument
+preview it carries is redacted *here*, before it leaves this process
+(plan §7.3).
 """
 
 import hashlib
 import logging
 import time
+import uuid
 from typing import Any
 
 from fastapi import Depends, FastAPI, Header, HTTPException
@@ -32,6 +35,7 @@ from phulax_gateway.control_plane import (
 from phulax_gateway.envelope import ActionEnvelope
 from phulax_gateway.health import health
 from phulax_gateway.policy_store import PolicyStore
+from phulax_gateway.redaction import redact
 from phulax_gateway.settings import Settings, get_settings
 from phulax_gateway.tokens import Claims, TokenError, validate_token
 
@@ -69,6 +73,7 @@ def create_app(
         envelope: ActionEnvelope, claims: Claims = Depends(bearer_claims)
     ) -> Any:
         started = time.monotonic()
+        trace_id = envelope.trace_id or uuid.uuid4()
         hashed = canonical_hash(
             tool_name=envelope.tool_name,
             environment=envelope.environment,
@@ -90,6 +95,7 @@ def create_app(
                 claims,
                 hashed,
                 started,
+                trace_id=trace_id,
                 verdict=verdict,
                 rule=rule,
                 reason_codes=list(decision.reason_codes) if decision else [rule],
@@ -177,6 +183,14 @@ def create_app(
                 risk=risk,
             )
 
+        # Redaction happens HERE, before anything is recorded or transmitted
+        # (plan §7.3 Day 20) — you cannot leak what you never wrote down.
+        preview, redacted_fields = (
+            redact(envelope.arguments, tool.get("sensitive_fields") or [])
+            if decision.effect == "require_approval"
+            else ({}, [])
+        )
+
         # Record first; anything that proceeds only does so with evidence.
         recorded = await _record(
             client,
@@ -184,16 +198,19 @@ def create_app(
             claims,
             hashed,
             started,
+            trace_id=trace_id,
             verdict=decision.effect,
             rule=primary,
             reason_codes=list(decision.reason_codes),
             matched_rules=list(decision.matched_rules),
             risk_score=risk.score,
             policy_version=str(decision.policy_version),
+            redacted_fields=redacted_fields,
             raise_on_failure=True,
         )
         base = {
             "request_id": str(envelope.request_id),
+            "trace_id": str(trace_id),
             "effect": decision.effect,
             "rule": primary,
             "reason_codes": list(decision.reason_codes),
@@ -205,65 +222,162 @@ def create_app(
         }
 
         if decision.effect == "require_approval":
-            # The approval that arrives later (Phase 3) authorizes exactly
-            # this canonical hash — mutated arguments become a mismatch.
-            return JSONResponse(
-                status_code=202,
-                content=base
-                | {"approver_role": decision.approver_role, "approval_binding": hashed},
+            return await _approval_flow(
+                client,
+                claims,
+                envelope,
+                hashed,
+                trace_id,
+                decision,
+                risk,
+                preview,
+                redacted_fields,
+                base,
             )
 
-        # ALLOW. Without an idempotency key there is no dedupe contract.
-        if envelope.idempotency_key is None:
-            return base | {"result": executor.execute(envelope.tool_name, envelope.arguments)}
+        return await _execute_action(client, claims, envelope, hashed, base)
 
-        try:
-            claim = await client.claim_execution(
-                {
-                    "org_id": str(claims.org_id),
-                    "idempotency_key": envelope.idempotency_key,
-                    "request_id": str(envelope.request_id),
-                    "canonical_hash": hashed,
-                }
-            )
-        except ExecutionConflict as exc:
-            raise HTTPException(status_code=409, detail=exc.detail) from exc
-        except ControlPlaneError as exc:
-            # No claim ⇒ no side effect. Retry-safe by construction.
-            raise HTTPException(
-                status_code=502, detail="execution claim could not be recorded"
-            ) from exc
+    return app
 
-        if not claim["claimed"]:
-            # A duplicate never re-executes; it reads the recorded outcome.
-            # Metadata only — the original result body never left the gateway.
-            return base | {
-                "duplicate": True,
-                "execution": {
-                    "execution_id": claim["execution_id"],
-                    "state": claim["state"],
-                    "result_meta": claim["result_meta"],
-                },
+
+async def _approval_flow(
+    client: ControlPlaneClient,
+    claims: Claims,
+    envelope: ActionEnvelope,
+    hashed: str,
+    trace_id: uuid.UUID,
+    decision: Decision,
+    risk: Any,
+    preview: dict,
+    redacted_fields: list[str],
+    base: dict,
+) -> Any:
+    """Resolve the human side: consume an approval for exactly this
+    request, or pause on the pending one (plan §7.3)."""
+    try:
+        resolution = await client.resolve_approval(
+            {
+                "org_id": str(claims.org_id),
+                "request_id": str(envelope.request_id),
+                "trace_id": str(trace_id),
+                "session_id": str(claims.session_id),
+                "canonical_hash": hashed,
+                "tool_name": envelope.tool_name,
+                "environment": envelope.environment,
+                "agent_version": envelope.agent_version,
+                "policy_version": str(decision.policy_version),
+                "approver_role": decision.approver_role,
+                "requester_user_id": (
+                    str(envelope.acting_user_id) if envelope.acting_user_id else None
+                ),
+                "args_preview": preview,
+                "redacted_fields": redacted_fields,
+                "reason_codes": list(decision.reason_codes),
+                "matched_rules": list(decision.matched_rules),
+                "risk_score": risk.score,
             }
+        )
+    except ControlPlaneError as exc:
+        # No approval record ⇒ no pause-and-resume contract ⇒ fail closed.
+        raise HTTPException(status_code=502, detail="approval could not be resolved") from exc
 
-        try:
-            result = executor.execute(envelope.tool_name, envelope.arguments)
-        except Exception:
-            await _complete_quietly(client, claim["execution_id"], "FAILED", {})
-            raise
-        result_meta = {"result_hash": hashlib.sha256(canonicalize(result).encode()).hexdigest()}
-        await _complete_quietly(client, claim["execution_id"], "SUCCEEDED", result_meta)
+    approval = resolution["approval"]
+    approval_block = {
+        "approval": {
+            "id": approval["id"],
+            "state": approval["state"],
+            "expires_at": approval["expires_at"],
+            "redacted_fields": approval["redacted_fields"],
+        },
+        "approval_binding": hashed,
+        "approver_role": approval["approver_role"],
+    }
+
+    if resolution["mode"] == "consumed":
+        # A human authorized exactly this hash, once. Execute under it.
+        response = await _execute_action(client, claims, envelope, hashed, base)
+        merged = response | approval_block
+        merged["reason_codes"] = [*base["reason_codes"], "APPROVAL_CONSUMED"]
+        return merged
+
+    if resolution["mode"] == "rejected":
+        raise HTTPException(
+            status_code=403,
+            detail=base
+            | approval_block
+            | {
+                "detail": "a human rejected this request",
+                "reason_codes": [*base["reason_codes"], "APPROVAL_REJECTED"],
+                "event": None,
+            },
+        )
+
+    # Pending: paused for judgment. No destination call happens (tested).
+    return JSONResponse(
+        status_code=202,
+        content=base
+        | approval_block
+        | {"reason_codes": [*base["reason_codes"], "APPROVAL_PENDING"]},
+    )
+
+
+async def _execute_action(
+    client: ControlPlaneClient,
+    claims: Claims,
+    envelope: ActionEnvelope,
+    hashed: str,
+    base: dict,
+) -> dict:
+    """Execute with at-most-once semantics when an idempotency key is
+    present (plan §5.5); a bare execute otherwise."""
+    if envelope.idempotency_key is None:
+        return base | {"result": executor.execute(envelope.tool_name, envelope.arguments)}
+
+    try:
+        claim = await client.claim_execution(
+            {
+                "org_id": str(claims.org_id),
+                "idempotency_key": envelope.idempotency_key,
+                "request_id": str(envelope.request_id),
+                "canonical_hash": hashed,
+            }
+        )
+    except ExecutionConflict as exc:
+        raise HTTPException(status_code=409, detail=exc.detail) from exc
+    except ControlPlaneError as exc:
+        # No claim ⇒ no side effect. Retry-safe by construction.
+        raise HTTPException(
+            status_code=502, detail="execution claim could not be recorded"
+        ) from exc
+
+    if not claim["claimed"]:
+        # A duplicate never re-executes; it reads the recorded outcome.
+        # Metadata only — the original result body never left the gateway.
         return base | {
-            "result": result,
-            "duplicate": False,
+            "duplicate": True,
             "execution": {
                 "execution_id": claim["execution_id"],
-                "state": "SUCCEEDED",
-                "result_meta": result_meta,
+                "state": claim["state"],
+                "result_meta": claim["result_meta"],
             },
         }
 
-    return app
+    try:
+        result = executor.execute(envelope.tool_name, envelope.arguments)
+    except Exception:
+        await _complete_quietly(client, claim["execution_id"], "FAILED", {})
+        raise
+    result_meta = {"result_hash": hashlib.sha256(canonicalize(result).encode()).hexdigest()}
+    await _complete_quietly(client, claim["execution_id"], "SUCCEEDED", result_meta)
+    return base | {
+        "result": result,
+        "duplicate": False,
+        "execution": {
+            "execution_id": claim["execution_id"],
+            "state": "SUCCEEDED",
+            "result_meta": result_meta,
+        },
+    }
 
 
 async def _record(
@@ -273,18 +387,21 @@ async def _record(
     hashed: str,
     started: float,
     *,
+    trace_id: uuid.UUID,
     verdict: str,
     rule: str,
     reason_codes: list[str],
     matched_rules: list[str],
     risk_score: int | None,
     policy_version: str | None,
+    redacted_fields: list[str] | None = None,
     raise_on_failure: bool = False,
 ) -> Any:
     """Ship the metadata-first decision event to the control plane."""
     payload = {
         "action_request": {
             "request_id": str(envelope.request_id),
+            "trace_id": str(trace_id),
             "idempotency_key": envelope.idempotency_key,
             "session_id": str(claims.session_id),
             "tool_name": envelope.tool_name,
@@ -292,6 +409,8 @@ async def _record(
             "acting_user_id": (str(envelope.acting_user_id) if envelope.acting_user_id else None),
             "canonical_hash": hashed,
             "args_meta": args_meta(envelope.arguments),
+            "content_mode": "metadata_only",
+            "redacted_fields": redacted_fields or [],
             "requested_at": envelope.requested_at.isoformat(),
         },
         "event": {

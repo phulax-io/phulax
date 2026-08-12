@@ -37,7 +37,7 @@ def create_user(body: UserCreate, db: Session = Depends(get_db)) -> User:
     existing = db.scalar(select(User).where(User.org_id == body.org_id, User.email == body.email))
     if existing is not None:
         raise HTTPException(status_code=409, detail="user already exists")
-    user = User(org_id=body.org_id, email=body.email, name=body.name)
+    user = User(org_id=body.org_id, email=body.email, name=body.name, role=body.role)
     db.add(user)
     db.flush()
     return user

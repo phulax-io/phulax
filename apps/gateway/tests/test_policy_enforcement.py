@@ -112,8 +112,12 @@ def test_large_refund_requires_approval_and_does_not_execute(
     destination.assert_not_called()
 
     events = api_client.get("/v1/events", params={"request_id": envelope["request_id"]}).json()
-    assert events[0]["verdict"] == "require_approval"
-    assert events[0]["matched_rules"] == ["approve-large-refund"]
+    # The request now carries two events: the decision and the approval
+    # lifecycle entry it triggered (Phase 3).
+    decision = next(event for event in events if event["type"] == "decision")
+    assert decision["verdict"] == "require_approval"
+    assert decision["matched_rules"] == ["approve-large-refund"]
+    assert any(event["rule"] == "approval.requested" for event in events)
 
 
 def test_small_refund_allowed_and_executes(gateway_client, seeded, destination):

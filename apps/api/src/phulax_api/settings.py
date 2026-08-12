@@ -23,6 +23,12 @@ class Settings(BaseSettings):
     # forge policy for deployments that forgot to override it (T08).
     # `make bootstrap` generates a local pair into .env.
     policy_signing_key: str = ""
+    # Approvals authorize one exact request for a short window (plan §7.3):
+    # long enough for a human, short enough to shrink TOCTOU.
+    approval_ttl_seconds: int = 900
+    # Optional webhook (Slack-compatible) pinged when an approval goes
+    # pending. Empty = polling UI only.
+    slack_webhook_url: str = ""
     token_ttl_seconds: int = 900  # short-lived by design (plan §7, T06)
     token_audience: str = "phulax-gateway"
     token_issuer: str = "phulax-control-plane"

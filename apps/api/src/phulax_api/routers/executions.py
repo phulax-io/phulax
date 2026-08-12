@@ -16,7 +16,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
 from phulax_api.db import get_db
-from phulax_api.models import Execution
+from phulax_api.models import ActionRequest, Event, Execution
 from phulax_api.schemas import ExecutionClaim, ExecutionClaimOut, ExecutionComplete, ExecutionOut
 
 router = APIRouter(prefix="/v1", tags=["executions"])
@@ -93,6 +93,7 @@ def complete_execution(
     execution = db.get(Execution, execution_id)
     assert execution is not None
     db.refresh(execution)
+    _record_execution_event(db, execution)
     return ExecutionOut(
         id=execution.id,
         org_id=execution.org_id,
@@ -103,3 +104,30 @@ def complete_execution(
         result_meta=execution.result_meta,
         created_at=execution.created_at,
     )
+
+
+def _record_execution_event(db: Session, execution: Execution) -> None:
+    """The result lands on the timeline too (plan §11.3): received →
+    decision → … → executing → result, all one trace query away."""
+    action_request = db.scalar(
+        select(ActionRequest)
+        .where(ActionRequest.request_id == execution.request_id)
+        .order_by(ActionRequest.created_at.desc())
+        .limit(1)
+    )
+    if action_request is None:
+        return
+    db.add(
+        Event(
+            action_request_id=action_request.id,
+            type="execution",
+            verdict=None,
+            rule=f"execution.{execution.state.lower()}",
+            detail={
+                "execution_id": str(execution.id),
+                "state": execution.state,
+                "result_meta": execution.result_meta,
+            },
+        )
+    )
+    db.flush()

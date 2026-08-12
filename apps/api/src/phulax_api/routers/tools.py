@@ -33,6 +33,7 @@ def register_tool(body: ToolCreate, db: Session = Depends(get_db)) -> Tool:
         args_schema=body.args_schema,
         sensitivity=body.sensitivity,
         side_effect=body.side_effect,
+        sensitive_fields=body.sensitive_fields,
     )
     db.add(tool)
     db.flush()

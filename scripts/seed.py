@@ -53,11 +53,15 @@ TOOLS = [
             "properties": {
                 "order_id": {"type": "string"},
                 "amount": {"type": "number", "exclusiveMinimum": 0},
+                "card_token": {"type": "string"},
+                "customer_note": {"type": "string"},
             },
             "required": ["order_id", "amount"],
         },
         "sensitivity": "high",
         "side_effect": "write",
+        # Redacted by the gateway before an approval preview leaves it.
+        "sensitive_fields": ["card_token", "customer_note"],
     },
 ]
 
@@ -124,7 +128,19 @@ def main() -> int:
                 },
                 {"org_id": org["id"], "name": "refund-agent"},
             )
+            finance = get_or_create(
+                client,
+                "/v1/users",
+                {
+                    "org_id": org["id"],
+                    "email": "finance@demo-org.dev",
+                    "name": "Fin Approver",
+                    "role": "finance_approver",
+                },
+                {"org_id": org["id"], "email": "finance@demo-org.dev"},
+            )
             seeded_tools = []
+            stale_tools = []
             for tool in TOOLS:
                 created = get_or_create(
                     client,
@@ -132,6 +148,10 @@ def main() -> int:
                     {"org_id": org["id"], **tool},
                     {"org_id": org["id"], "name": tool["name"]},
                 )
+                if created["args_schema"] != tool["args_schema"] or created[
+                    "sensitive_fields"
+                ] != tool.get("sensitive_fields", []):
+                    stale_tools.append(created["name"])
                 seeded_tools.append(
                     f"{created['name']} ({created['sensitivity']}/{created['side_effect']})"
                 )
@@ -141,9 +161,16 @@ def main() -> int:
 
             print(f"seed: org        {org['name']} ({org['id']})")
             print(f"seed: owner      {owner['email']}")
+            print(f"seed: approver   {finance['email']} (role {finance['role']})")
             print(f"seed: agent      {agent['name']} v{agent['latest_version']['version']}")
             print(f"seed: tools      {', '.join(seeded_tools)}")
             print(f"seed: policy     bundle v{bundle['version']} (signed): {rule_ids}")
+            if stale_tools:
+                print(
+                    f"seed: WARNING    tool(s) {', '.join(stale_tools)} already exist with an "
+                    "older definition — reset dev data to pick up the new schema: "
+                    "docker compose down -v && make dev migrate seed"
+                )
             return 0
     except httpx.HTTPError as exc:
         print(f"seed: FAILED talking to {API_URL} — is 'make dev' running? ({exc})")

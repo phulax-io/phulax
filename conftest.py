@@ -29,7 +29,7 @@ from sqlalchemy.orm import sessionmaker  # noqa: E402
 
 ALEMBIC_INI = "apps/api/alembic.ini"
 ALL_TABLES = (
-    "events, action_requests, executions, policy_bundles, sessions, tools, "
+    "events, approvals, action_requests, executions, policy_bundles, sessions, tools, "
     "agent_versions, agents, users, organizations"
 )
 
@@ -195,6 +195,8 @@ def seeded(api_client: TestClient) -> dict:
                 "properties": {
                     "order_id": {"type": "string"},
                     "amount": {"type": "number", "exclusiveMinimum": 0},
+                    "card_token": {"type": "string"},
+                    "customer_note": {"type": "string"},
                 },
                 "required": ["order_id", "amount"],
             },
@@ -209,8 +211,21 @@ def seeded(api_client: TestClient) -> dict:
                 "args_schema": args_schema,
                 "sensitivity": sensitivity,
                 "side_effect": side_effect,
+                # Redacted by the gateway before approval previews leave it.
+                "sensitive_fields": (
+                    ["card_token", "customer_note"] if name == "issue_refund" else []
+                ),
             },
         )
+    finance = api_client.post(
+        "/v1/users",
+        json={
+            "org_id": org["id"],
+            "email": "finance@demo-org.dev",
+            "name": "Fin Approver",
+            "role": "finance_approver",
+        },
+    ).json()
     bundle = api_client.post(
         "/v1/policy-bundles",
         json={"org_id": org["id"], "document": CANONICAL_BUNDLE_YAML},
@@ -226,6 +241,7 @@ def seeded(api_client: TestClient) -> dict:
     return {
         "org": org,
         "owner": owner,
+        "finance": finance,
         "agent": agent,
         "bundle": bundle,
         "session": session,

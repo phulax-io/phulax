@@ -53,6 +53,11 @@ class ControlPlaneClient:
         self._raise_for_status(response)
         return response.json()
 
+    async def resolve_approval(self, payload: dict[str, Any]) -> dict[str, Any]:
+        response = await self._client.post("/v1/approvals/resolve", json=payload)
+        self._raise_for_status(response)
+        return response.json()
+
     async def claim_execution(self, payload: dict[str, Any]) -> dict[str, Any]:
         response = await self._client.post("/v1/executions/claim", json=payload)
         if response.status_code == 409:

@@ -8,6 +8,9 @@ from pydantic import BaseModel, Field
 
 class ActionEnvelope(BaseModel):
     request_id: uuid.UUID
+    # The whole-story correlator (plan §11.3): reuse one trace_id across a
+    # request → approval → retry cycle and the timeline reconstructs it.
+    trace_id: uuid.UUID | None = None
     idempotency_key: str | None = None
     agent_id: uuid.UUID
     agent_version: str

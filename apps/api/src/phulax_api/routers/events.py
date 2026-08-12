@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from phulax_api.db import get_db
 from phulax_api.models import ActionRequest, Agent, AgentSession, AgentVersion, Event, Tool
-from phulax_api.schemas import EventIngest, EventOut
+from phulax_api.schemas import EventIngest, EventOut, TimelineEventOut
 
 router = APIRouter(prefix="/v1", tags=["events"])
 
@@ -34,6 +34,7 @@ def ingest_event(body: EventIngest, db: Session = Depends(get_db)) -> EventOut:
 
     request = ActionRequest(
         request_id=body.action_request.request_id,
+        trace_id=body.action_request.trace_id,
         idempotency_key=body.action_request.idempotency_key,
         session_id=body.action_request.session_id,
         tool_id=tool.id if tool else None,
@@ -42,6 +43,8 @@ def ingest_event(body: EventIngest, db: Session = Depends(get_db)) -> EventOut:
         acting_user_id=body.action_request.acting_user_id,
         canonical_hash=body.action_request.canonical_hash,
         args_meta=body.action_request.args_meta,
+        content_mode=body.action_request.content_mode,
+        redacted_fields=body.action_request.redacted_fields,
         requested_at=body.action_request.requested_at,
     )
     db.add(request)
@@ -81,14 +84,18 @@ def _event_out(request: ActionRequest, event: Event) -> EventOut:
     return EventOut(
         id=event.id,
         request_id=request.request_id,
+        trace_id=request.trace_id,
         session_id=request.session_id,
         tool_name=request.tool_name,
         environment=request.environment,
         canonical_hash=request.canonical_hash,
         args_meta=request.args_meta,
+        content_mode=request.content_mode,
+        redacted_fields=request.redacted_fields,
         type=event.type,
         verdict=event.verdict,  # type: ignore[arg-type]
         rule=event.rule,
+        detail=event.detail,
         reason_codes=event.reason_codes,
         matched_rules=event.matched_rules,
         risk_score=event.risk_score,
@@ -96,3 +103,33 @@ def _event_out(request: ActionRequest, event: Event) -> EventOut:
         latency_ms=event.latency_ms,
         created_at=event.created_at,
     )
+
+
+@router.get("/timeline", response_model=list[TimelineEventOut])
+def timeline(trace_id: uuid.UUID, db: Session = Depends(get_db)):
+    """One query, the whole story (plan §11.3 Day 19): every event of every
+    request that shares this trace, in the order it happened."""
+    rows = db.execute(
+        select(ActionRequest, Event)
+        .join(Event, Event.action_request_id == ActionRequest.id)
+        .where(ActionRequest.trace_id == trace_id)
+        .order_by(Event.created_at.asc(), Event.id.asc())
+    ).all()
+    return [
+        TimelineEventOut(
+            id=event.id,
+            trace_id=request.trace_id,
+            request_id=request.request_id,
+            session_id=request.session_id,
+            tool_name=request.tool_name,
+            type=event.type,
+            verdict=event.verdict,  # type: ignore[arg-type]
+            rule=event.rule,
+            detail=event.detail,
+            reason_codes=event.reason_codes,
+            matched_rules=event.matched_rules,
+            policy_version=event.policy_version,
+            created_at=event.created_at,
+        )
+        for request, event in rows
+    ]
