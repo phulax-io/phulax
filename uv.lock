@@ -649,7 +649,7 @@ requires-dist = [
     { name = "jsonschema", specifier = ">=4.23" },
     { name = "phulax-policy", editable = "packages/policy" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
-    { name = "pydantic", extras = ["email"], specifier = ">=2.9" },
+    { name = "pydantic", extras = ["email"], specifier = ">=2.13.4" },
     { name = "pydantic-settings", specifier = ">=2.6" },
     { name = "pyjwt", specifier = ">=2.9" },
     { name = "python-multipart", specifier = ">=0.0.18" },
